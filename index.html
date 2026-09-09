@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Fractured Orb — 本地 Shadertoy 运行器</title>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #info {
+    position: fixed; left: 12px; bottom: 10px;
+    font: 12px/1.6 Consolas, monospace; color: #fff;
+    text-shadow: 0 1px 2px #000; opacity: .85;
+    transition: opacity 1s; pointer-events: none; user-select: none;
+  }
+  #info a { color: #9cf; pointer-events: auto; }
+  #info.dim { opacity: 0; }
+  #err {
+    position: fixed; inset: 0; margin: auto; width: min(90vw, 900px); height: min(80vh, 600px);
+    background: #300; color: #fbb; font: 12px/1.5 Consolas, monospace;
+    padding: 16px; overflow: auto; white-space: pre-wrap; display: none; z-index: 10;
+    border: 1px solid #a66;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">
+  <b>Fractured Orb</b> — tdhooper (2021) · 本地副本 ·
+  <a href="https://www.shadertoy.com/view/ttycWW" target="_blank">shadertoy.com/view/ttycWW</a><br>
+  空格: 暂停 · R: 重置时间 · 拖动鼠标: iMouse
+</div>
+<pre id="err"></pre>
+<script>
+"use strict";
+
+/* ---------------- Shadertoy 兼容运行器 (WebGL2) ----------------
+   通道结构（与原作一致）:
+     Image    : iChannel0 = Buffer A (linear, clamp)
+     Buffer A : iChannel0 = textures/bluenoise.png (mipmap, repeat, vflip)
+------------------------------------------------------------------ */
+
+const canvas = document.getElementById('c');
+const errBox = document.getElementById('err');
+const info = document.getElementById('info');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
+if (!gl) fail('需要 WebGL2 支持');
+
+const FRAG_HEADER = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform vec3  iResolution;
+uniform float iTime;
+uniform float iTimeDelta;
+uniform int   iFrame;
+uniform float iFrameRate;
+uniform float iSampleRate;
+uniform float iChannelTime[4];
+uniform vec3  iChannelResolution[4];
+uniform vec4  iMouse;
+uniform vec4  iDate;
+uniform sampler2D iChannel0;
+uniform sampler2D iChannel1;
+uniform sampler2D iChannel2;
+uniform sampler2D iChannel3;
+out vec4 outColor;
+#define texture2D texture
+#define HW_PERFORMANCE 1
+`;
+
+const VERT = `#version 300 es
+void main() {
+  vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
+  gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}`;
+
+function fail(msg) {
+  errBox.style.display = 'block';
+  errBox.textContent += msg + '\n';
+  throw new Error(msg);
+}
+
+function compile(type, src, label) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    fail('== ' + label + ' 编译失败 ==\n' + gl.getShaderInfoLog(sh) + '\n--- 源码 ---\n' + src);
+  }
+  return sh;
+}
+
+function program(fragSrc, label) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VERT, label + ' : vertex'));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, FRAG_HEADER + fragSrc +
+    '\nvoid main(){ mainImage(outColor, gl_FragCoord.xy); }', label + ' : fragment'));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    fail('== ' + label + ' 链接失败 ==\n' + gl.getProgramInfoLog(p));
+  }
+  const u = {};
+  for (const name of ['iResolution','iTime','iTimeDelta','iFrame','iFrameRate','iSampleRate',
+                      'iChannelTime','iChannelResolution','iMouse','iDate']) {
+    u[name] = gl.getUniformLocation(p, name);
+  }
+  return { prog: p, u };
+}
+
+/* ---------- 资源加载 ---------- */
+async function loadText(url) {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(url + ' -> HTTP ' + r.status);
+  return r.text();
+}
+function loadImage(url) {
+  return new Promise((res, rej) => {
+    const img = new Image();
+    img.onload = () => res(img);
+    img.onerror = () => rej(new Error(url + ' 加载失败'));
+    img.src = url;
+  });
+}
+
+/* ---------- Buffer A 双缓冲 ---------- */
+let bufTex = [null, null], bufFbo = [null, null], bufRead = 0;
+
+function allocBuffers(w, h) {
+  for (let i = 0; i < 2; i++) {
+    if (bufTex[i]) { gl.deleteTexture(bufTex[i]); gl.deleteFramebuffer(bufFbo[i]); }
+    bufTex[i] = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, bufTex[i]);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    bufFbo[i] = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bufFbo[i]);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bufTex[i], 0);
+  }
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+}
+
+/* ---------- iMouse ---------- */
+const mouse = { x: 0, y: 0, z: 0, w: 0 };
+function mousePos(e) {
+  const r = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  return [ (e.clientX - r.left) * dpr, (r.height - (e.clientY - r.top)) * dpr ];
+}
+canvas.addEventListener('mousedown', e => { const [x,y] = mousePos(e); mouse.x=x; mouse.y=y; mouse.z=x; mouse.w=y; });
+canvas.addEventListener('mousemove', e => { if (e.buttons & 1) { const [x,y] = mousePos(e); mouse.x=x; mouse.y=y; } });
+window.addEventListener('mouseup', () => { mouse.w = -Math.abs(mouse.w); });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ---------- 主流程 ---------- */
+let progA, progImg, noiseTex;
+let iTime = 0, iFrame = 0, paused = false, lastT = null, fps = 60;
+
+async function main() {
+  const [bufASrc, imgSrc, noiseImg] = await Promise.all([
+    loadText('shaders/bufferA.frag'),
+    loadText('shaders/image.frag'),
+    loadImage('textures/bluenoise.png'),
+  ]);
+  progA = program(bufASrc, 'Buffer A');
+  progImg = program(imgSrc, 'Image');
+
+  noiseTex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, noiseTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);   // Shadertoy 采样器: vflip=true
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, noiseImg);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+  gl.generateMipmap(gl.TEXTURE_2D);               // Shadertoy 采样器: mipmap
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+
+  resize();
+  window.addEventListener('resize', resize);
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space') { paused = !paused; e.preventDefault(); }
+    if (e.code === 'KeyR') { iTime = 0; iFrame = 0; }
+  });
+  setTimeout(() => info.classList.add('dim'), 6000);
+  requestAnimationFrame(loop);
+}
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w; canvas.height = h;
+    allocBuffers(w, h);
+  }
+}
+
+const date0 = new Date();
+const iDate = [ date0.getFullYear(), date0.getMonth(), date0.getDate(),
+                date0.getHours()*3600 + date0.getMinutes()*60 + date0.getSeconds() ];
+
+function loop(tms) {
+  requestAnimationFrame(loop);
+  resize();
+  const t = tms / 1000;
+  const dt = lastT === null ? 0 : Math.min(t - lastT, 0.1);
+  lastT = t;
+  fps = fps * 0.95 + (dt > 0 ? 1/dt : 60) * 0.05;
+  if (!paused) iTime += dt;
+
+  const W = canvas.width, H = canvas.height;
+  const now = new Date();
+  iDate[3] = now.getHours()*3600 + now.getMinutes()*60 + now.getSeconds();
+
+  gl.activeTexture(gl.TEXTURE0);
+
+  // ---- Pass 1: Buffer A ----
+  const write = 1 - bufRead;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bufFbo[write]);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(progA.prog);
+  gl.uniform3f(progA.u.iResolution, W, H, 1/W);
+  gl.uniform1f(progA.u.iTime, iTime);
+  gl.uniform1f(progA.u.iTimeDelta, dt);
+  gl.uniform1i(progA.u.iFrame, iFrame);
+  gl.uniform1f(progA.u.iFrameRate, fps);
+  gl.uniform1f(progA.u.iSampleRate, 44100);
+  gl.uniform1fv(progA.u.iChannelTime, [iTime, iTime, iTime, iTime]);
+  gl.uniform3fv(progA.u.iChannelResolution, [1024,1024,1, 0,0,0, 0,0,0, 0,0,0]);
+  gl.uniform4f(progA.u.iMouse, mouse.x, mouse.y, mouse.z, mouse.w);
+  gl.uniform4fv(progA.u.iDate, iDate);
+  gl.bindTexture(gl.TEXTURE_2D, noiseTex);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // ---- Pass 2: Image (输出到屏幕) ----
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(progImg.prog);
+  gl.uniform3f(progImg.u.iResolution, W, H, 1/W);
+  gl.uniform1f(progImg.u.iTime, iTime);
+  gl.uniform1f(progImg.u.iTimeDelta, dt);
+  gl.uniform1i(progImg.u.iFrame, iFrame);
+  gl.uniform1f(progImg.u.iFrameRate, fps);
+  gl.uniform1f(progImg.u.iSampleRate, 44100);
+  gl.uniform1fv(progImg.u.iChannelTime, [iTime, iTime, iTime, iTime]);
+  gl.uniform3fv(progImg.u.iChannelResolution, [W,H,1, 0,0,0, 0,0,0, 0,0,0]);
+  gl.uniform4f(progImg.u.iMouse, mouse.x, mouse.y, mouse.z, mouse.w);
+  gl.uniform4fv(progImg.u.iDate, iDate);
+  gl.bindTexture(gl.TEXTURE_2D, bufTex[bufRead]);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  bufRead = write;
+  iFrame++;
+}
+
+main().catch(e => fail(e.message + '\n' + (e.stack || '')));
+</script>
+</body>
+</html>
