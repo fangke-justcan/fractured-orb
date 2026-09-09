@@ -20,6 +20,53 @@
     padding: 16px; overflow: auto; white-space: pre-wrap; display: none; z-index: 10;
     border: 1px solid #a66;
   }
+
+  /* ---------- 参数面板 ---------- */
+  #panel {
+    position: fixed; top: 14px; right: 14px; width: 300px;
+    max-height: calc(100vh - 28px);
+    background: rgba(18, 18, 26, .82);
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255,255,255,.14);
+    border-radius: 12px; color: #eee;
+    font: 12px/1.4 "Segoe UI", system-ui, sans-serif;
+    box-shadow: 0 8px 32px rgba(0,0,0,.5);
+    display: flex; flex-direction: column; z-index: 20;
+    user-select: none;
+  }
+  #panel.hidden { display: none; }
+  #panelHead {
+    display: flex; align-items: center; gap: 8px;
+    padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,.1);
+    font-weight: 600; font-size: 13px;
+  }
+  #panelHead .spacer { flex: 1; }
+  #panelHead button {
+    background: rgba(255,255,255,.1); color: #ddd; border: 0;
+    border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 11px;
+  }
+  #panelHead button:hover { background: rgba(255,255,255,.22); }
+  #panelBody { overflow-y: auto; padding: 4px 12px 12px; scrollbar-width: thin; }
+  .group-title {
+    margin: 10px 0 2px; font-size: 11px; font-weight: 700;
+    color: #8ab4ff; letter-spacing: .06em; text-transform: uppercase;
+  }
+  .row { margin: 7px 0 2px; }
+  .row-label { display: flex; justify-content: space-between; margin-bottom: 2px; }
+  .row-label .val { color: #ffd28a; font-family: Consolas, monospace; }
+  .row input[type=range] {
+    width: 100%; height: 18px; margin: 0; accent-color: #7aa2ff; cursor: pointer;
+  }
+  .row-check { display: flex; align-items: center; gap: 8px; margin: 8px 0 2px; cursor: pointer; }
+  .row-check input { accent-color: #7aa2ff; }
+  #panelOpen {
+    position: fixed; top: 14px; right: 14px; z-index: 19;
+    background: rgba(18, 18, 26, .82); backdrop-filter: blur(12px);
+    color: #eee; border: 1px solid rgba(255,255,255,.18);
+    border-radius: 10px; padding: 8px 14px; cursor: pointer;
+    font: 13px "Segoe UI", system-ui, sans-serif;
+  }
+  #panelOpen.hidden { display: none; }
 </style>
 </head>
 <body>
@@ -27,7 +74,17 @@
 <div id="info">
   <b>Fractured Orb</b> — tdhooper (2021) · 本地副本 ·
   <a href="https://www.shadertoy.com/view/ttycWW" target="_blank">shadertoy.com/view/ttycWW</a><br>
-  空格: 暂停 · R: 重置时间 · 拖动鼠标: iMouse
+  空格: 暂停 · R: 重置时间 · 拖动鼠标: iMouse · 右上 ⚙: 参数面板
+</div>
+<button id="panelOpen">⚙ 参数</button>
+<div id="panel">
+  <div id="panelHead">
+    参数调节
+    <span class="spacer"></span>
+    <button id="resetBtn">重置</button>
+    <button id="panelClose">✕</button>
+  </div>
+  <div id="panelBody"></div>
 </div>
 <pre id="err"></pre>
 <script>
@@ -37,6 +94,7 @@
    通道结构（与原作一致）:
      Image    : iChannel0 = Buffer A (linear, clamp)
      Buffer A : iChannel0 = textures/bluenoise.png (mipmap, repeat, vflip)
+   在原作基础上新增: 可调参数面板（硬编码常量 → uniform）
 ------------------------------------------------------------------ */
 
 const canvas = document.getElementById('c');
@@ -44,6 +102,84 @@ const errBox = document.getElementById('err');
 const info = document.getElementById('info');
 const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
 if (!gl) fail('需要 WebGL2 支持');
+
+/* ================= 可调参数定义 =================
+   uniform 名 / 中文标签 / 范围 / 默认值 / 所属通道 / 分组      */
+const PARAMS = [
+  // 色散与折射
+  { u: 'uMaxDisperse',  label: '色散采样数',   min: 1,    max: 8,    step: 1,     def: 5,     group: '色散与折射' },
+  { u: 'uMaxBounce',    label: '最大弹射次数', min: 1,    max: 15,   step: 1,     def: 10,    group: '色散与折射' },
+  { u: 'uIorMin',       label: '折射率 下限',  min: 1.0,  max: 2.0,  step: 0.01,  def: 1.2,   group: '色散与折射' },
+  { u: 'uIorMax',       label: '折射率 上限',  min: 1.0,  max: 2.5,  step: 0.01,  def: 1.8,   group: '色散与折射' },
+  // 形状
+  { u: 'uOrbOuter',     label: '球体外半径',   min: 0.15, max: 0.5,  step: 0.005, def: 0.35,  group: '形状' },
+  { u: 'uOrbInner',     label: '球体内半径',   min: 0.05, max: 0.45, step: 0.005, def: 0.24,  group: '形状' },
+  { u: 'uEdgeWidth',    label: '面片缝隙宽度', min: 0,    max: 0.03, step: 0.001, def: 0.005, group: '形状' },
+  // 动画
+  { u: 'uCycleDuration',label: '循环周期 (秒)', min: 1,    max: 15,   step: 0.1,   def: 10/3,  group: '动画' },
+  { u: 'uExplodeAmp',   label: '爆炸幅度',     min: 0,    max: 3,    step: 0.05,  def: 1.4,   group: '动画' },
+  { u: 'uWobbleAmp',    label: '回弹抖动',     min: 0,    max: 0.5,  step: 0.01,  def: 0.2,   group: '动画' },
+  { u: 'uSpinSpeed',    label: '旋转速度',     min: 0,    max: 3,    step: 0.05,  def: 1,     group: '动画' },
+  // 相机
+  { u: 'uCamDist',      label: '相机距离',     min: 5,    max: 16,   step: 0.1,   def: 9.5,   group: '相机' },
+  { u: 'uZoom',         label: '视野缩放',     min: 0.05, max: 0.5,  step: 0.002, def: 0.168, group: '相机' },
+  // 灯光
+  { u: 'uLightTheta',   label: '灯光方位角',   min: -3,   max: 3,    step: 0.01,  def: -0.2567, group: '灯光' },
+  { u: 'uLightPhi',     label: '灯光仰角',     min: -3,   max: 3,    step: 0.01,  def: 0.5455,  group: '灯光' },
+  // 景深
+  { u: 'uDofEnabled',   label: '启用景深',     check: true, def: 1,  group: '景深' },
+  { u: 'uFocusPoint',   label: '对焦点距离',   min: 0.2,  max: 1,    step: 0.005, def: 0.65,  group: '景深' },
+  { u: 'uFocusScale',   label: '虚化强度',     min: 0,    max: 3,    step: 0.05,  def: 1,     group: '景深' },
+  { u: 'uMaxBlur',      label: '最大模糊半径', min: 0,    max: 20,   step: 0.5,   def: 10,    group: '景深' },
+  // 色调与曝光
+  { u: 'uExposure',     label: '曝光',         min: 4,    max: 32,   step: 0.5,   def: 16,    group: '色调与曝光' },
+  { u: 'uPostGamma',    label: '伽马',         min: 0.8,  max: 2,    step: 0.01,  def: 1.25,  group: '色调与曝光' },
+  { u: 'uPostGain',     label: '增益',         min: 0.5,  max: 4,    step: 0.05,  def: 2.5,   group: '色调与曝光' },
+];
+
+const state = {};
+for (const p of PARAMS) state[p.u] = p.def;
+
+/* 把 shader 中的硬编码常量替换为 uniform（保持原文件不做改动，替换在加载时进行） */
+const SUBS_BUFFER_A = [
+  ['const float MAX_DISPERSE = 5.;', ''],
+  ['const float MAX_DISPERSE = 3.;', ''],
+  ['const float MAX_BOUNCE = 10.;', ''],
+  ['const float MAX_BOUNCE = 4.;', ''],
+  ['MAX_DISPERSE', 'uMaxDisperse'],
+  ['MAX_BOUNCE', 'uMaxBounce'],
+  ['float OUTER = .35;',  'float OUTER;'],
+  ['float INNER = .24;',  'float INNER;'],
+  ['float duration = 10./3.;', 'float duration = uCycleDuration;'],
+  ['time = mod(iTime / duration, 1.);',
+   'OUTER = uOrbOuter; INNER = uOrbInner;\n    time = mod(iTime / duration, 1.);'],
+  ['edge -= .005;',       'edge -= uEdgeWidth;'],
+  ['float spin = time * (PI/2.) - .15;', 'float spin = time * (PI/2.) * uSpinSpeed - .15;'],
+  ['explode *= 1.4;',     'explode *= uExplodeAmp;'],
+  ['smoothstep(.4, .0, t2) * .2;', 'smoothstep(.4, .0, t2) * uWobbleAmp;'],
+  ['camOrigin = vec3(0,0,9.5);', 'camOrigin = vec3(0,0,uCamDist);'],
+  ['uv * .168',           'uv * uZoom'],
+  ['float ior = mix(1.2, 1.8, wavelength);', 'float ior = mix(uIorMin, uIorMax, wavelength);'],
+  ['envOrientation = sphericalMatrix(((vec2(81.5, 119) / vec2(187)) * 2. - 1.) * 2.);',
+   'envOrientation = sphericalMatrix(vec2(uLightTheta, uLightPhi));'],
+];
+const SUBS_IMAGE = [
+  ['#ifdef DISABLE_DOF', 'if (uDofEnabled < 0.5) {'],
+  ['#endif', '}'],
+  ['const float MAX_BLUR_SIZE = 10.;', ''],
+  ['MAX_BLUR_SIZE', 'uMaxBlur'],
+  ['depthOfField(uv, .65, 1.)', 'depthOfField(uv, uFocusPoint, uFocusScale)'],
+  ['col = pow(col, vec3(1.25)) * 2.5;', 'col = pow(col, vec3(uPostGamma)) * uPostGain;'],
+  ['texColor *= 16.;',  'texColor *= uExposure;'],
+];
+
+function applySubs(src, subs, label) {
+  for (const [from, to] of subs) {
+    if (!src.includes(from)) fail('参数注入失败: 在 ' + label + ' 中找不到 → ' + from);
+    src = src.split(from).join(to);
+  }
+  return src;
+}
 
 const FRAG_HEADER = `#version 300 es
 precision highp float;
@@ -63,6 +199,28 @@ uniform sampler2D iChannel0;
 uniform sampler2D iChannel1;
 uniform sampler2D iChannel2;
 uniform sampler2D iChannel3;
+uniform float uMaxDisperse;
+uniform float uMaxBounce;
+uniform float uIorMin;
+uniform float uIorMax;
+uniform float uOrbOuter;
+uniform float uOrbInner;
+uniform float uEdgeWidth;
+uniform float uCycleDuration;
+uniform float uExplodeAmp;
+uniform float uWobbleAmp;
+uniform float uSpinSpeed;
+uniform float uCamDist;
+uniform float uZoom;
+uniform float uLightTheta;
+uniform float uLightPhi;
+uniform float uDofEnabled;
+uniform float uFocusPoint;
+uniform float uFocusScale;
+uniform float uMaxBlur;
+uniform float uExposure;
+uniform float uPostGamma;
+uniform float uPostGain;
 out vec4 outColor;
 #define texture2D texture
 #define HW_PERFORMANCE 1
@@ -104,6 +262,7 @@ function program(fragSrc, label) {
                       'iChannelTime','iChannelResolution','iMouse','iDate']) {
     u[name] = gl.getUniformLocation(p, name);
   }
+  for (const prm of PARAMS) u[prm.u] = gl.getUniformLocation(p, prm.u);
   return { prog: p, u };
 }
 
@@ -154,16 +313,88 @@ canvas.addEventListener('mousemove', e => { if (e.buttons & 1) { const [x,y] = m
 window.addEventListener('mouseup', () => { mouse.w = -Math.abs(mouse.w); });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
+/* ---------- 参数面板 UI ---------- */
+const panel = document.getElementById('panel');
+const panelOpen = document.getElementById('panelOpen');
+const panelBody = document.getElementById('panelBody');
+const inputs = {};
+
+function fmt(v, step) {
+  if (step >= 1) return String(Math.round(v));
+  const dec = step >= 0.1 ? 2 : 3;
+  return Number(v).toFixed(dec);
+}
+
+function buildPanel() {
+  let lastGroup = null;
+  for (const p of PARAMS) {
+    if (p.group !== lastGroup) {
+      lastGroup = p.group;
+      const h = document.createElement('div');
+      h.className = 'group-title';
+      h.textContent = p.group;
+      panelBody.appendChild(h);
+    }
+    const row = document.createElement('div');
+    row.className = p.check ? 'row-check' : 'row';
+    if (p.check) {
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.checked = !!p.def;
+      const lb = document.createElement('span');
+      lb.textContent = p.label;
+      cb.addEventListener('change', () => { state[p.u] = cb.checked ? 1 : 0; });
+      row.append(cb, lb);
+      inputs[p.u] = cb;
+    } else {
+      const lab = document.createElement('div');
+      lab.className = 'row-label';
+      lab.innerHTML = `<span>${p.label}</span><span class="val"></span>`;
+      const val = lab.querySelector('.val');
+      const rng = document.createElement('input');
+      rng.type = 'range';
+      rng.min = p.min; rng.max = p.max; rng.step = p.step; rng.value = p.def;
+      val.textContent = fmt(p.def, p.step);
+      rng.addEventListener('input', () => {
+        state[p.u] = parseFloat(rng.value);
+        val.textContent = fmt(state[p.u], p.step);
+      });
+      row.append(lab, rng);
+      inputs[p.u] = { rng, val, p };
+    }
+    panelBody.appendChild(row);
+  }
+}
+
+function resetParams() {
+  for (const p of PARAMS) {
+    state[p.u] = p.def;
+    const inp = inputs[p.u];
+    if (p.check) inp.checked = !!p.def;
+    else { inp.rng.value = p.def; inp.val.textContent = fmt(p.def, p.step); }
+  }
+}
+
+buildPanel();
+document.getElementById('resetBtn').addEventListener('click', resetParams);
+document.getElementById('panelClose').addEventListener('click', () => {
+  panel.classList.add('hidden'); panelOpen.classList.remove('hidden');
+});
+panelOpen.addEventListener('click', () => {
+  panel.classList.remove('hidden'); panelOpen.classList.add('hidden');
+});
+
 /* ---------- 主流程 ---------- */
 let progA, progImg, noiseTex;
 let iTime = 0, iFrame = 0, paused = false, lastT = null, fps = 60;
 
 async function main() {
-  const [bufASrc, imgSrc, noiseImg] = await Promise.all([
+  let [bufASrc, imgSrc, noiseImg] = await Promise.all([
     loadText('shaders/bufferA.frag'),
     loadText('shaders/image.frag'),
     loadImage('textures/bluenoise.png'),
   ]);
+  bufASrc = applySubs(bufASrc, SUBS_BUFFER_A, 'Buffer A');
+  imgSrc = applySubs(imgSrc, SUBS_IMAGE, 'Image');
   progA = program(bufASrc, 'Buffer A');
   progImg = program(imgSrc, 'Image');
 
@@ -202,6 +433,20 @@ const date0 = new Date();
 const iDate = [ date0.getFullYear(), date0.getMonth(), date0.getDate(),
                 date0.getHours()*3600 + date0.getMinutes()*60 + date0.getSeconds() ];
 
+function setUniforms(P, dt) {
+  const W = canvas.width, H = canvas.height;
+  gl.uniform3f(P.u.iResolution, W, H, 1/W);
+  gl.uniform1f(P.u.iTime, iTime);
+  gl.uniform1f(P.u.iTimeDelta, dt);
+  gl.uniform1i(P.u.iFrame, iFrame);
+  gl.uniform1f(P.u.iFrameRate, fps);
+  gl.uniform1f(P.u.iSampleRate, 44100);
+  gl.uniform1fv(P.u.iChannelTime, [iTime, iTime, iTime, iTime]);
+  gl.uniform4f(P.u.iMouse, mouse.x, mouse.y, mouse.z, mouse.w);
+  gl.uniform4fv(P.u.iDate, iDate);
+  for (const p of PARAMS) gl.uniform1f(P.u[p.u], state[p.u]);
+}
+
 function loop(tms) {
   requestAnimationFrame(loop);
   resize();
@@ -222,16 +467,8 @@ function loop(tms) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, bufFbo[write]);
   gl.viewport(0, 0, W, H);
   gl.useProgram(progA.prog);
-  gl.uniform3f(progA.u.iResolution, W, H, 1/W);
-  gl.uniform1f(progA.u.iTime, iTime);
-  gl.uniform1f(progA.u.iTimeDelta, dt);
-  gl.uniform1i(progA.u.iFrame, iFrame);
-  gl.uniform1f(progA.u.iFrameRate, fps);
-  gl.uniform1f(progA.u.iSampleRate, 44100);
-  gl.uniform1fv(progA.u.iChannelTime, [iTime, iTime, iTime, iTime]);
+  setUniforms(progA, dt);
   gl.uniform3fv(progA.u.iChannelResolution, [1024,1024,1, 0,0,0, 0,0,0, 0,0,0]);
-  gl.uniform4f(progA.u.iMouse, mouse.x, mouse.y, mouse.z, mouse.w);
-  gl.uniform4fv(progA.u.iDate, iDate);
   gl.bindTexture(gl.TEXTURE_2D, noiseTex);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
@@ -239,16 +476,8 @@ function loop(tms) {
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, W, H);
   gl.useProgram(progImg.prog);
-  gl.uniform3f(progImg.u.iResolution, W, H, 1/W);
-  gl.uniform1f(progImg.u.iTime, iTime);
-  gl.uniform1f(progImg.u.iTimeDelta, dt);
-  gl.uniform1i(progImg.u.iFrame, iFrame);
-  gl.uniform1f(progImg.u.iFrameRate, fps);
-  gl.uniform1f(progImg.u.iSampleRate, 44100);
-  gl.uniform1fv(progImg.u.iChannelTime, [iTime, iTime, iTime, iTime]);
+  setUniforms(progImg, dt);
   gl.uniform3fv(progImg.u.iChannelResolution, [W,H,1, 0,0,0, 0,0,0, 0,0,0]);
-  gl.uniform4f(progImg.u.iMouse, mouse.x, mouse.y, mouse.z, mouse.w);
-  gl.uniform4fv(progImg.u.iDate, iDate);
   gl.bindTexture(gl.TEXTURE_2D, bufTex[bufRead]);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
