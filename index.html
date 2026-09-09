@@ -110,6 +110,15 @@ canvas.addEventListener('webglcontextlost', (e) => {
 /* ================= 可调参数定义 =================
    uniform 名 / 中文标签 / 范围 / 默认值 / 所属通道 / 分组      */
 const PARAMS = [
+  // 性能
+  { u: 'uResCap',       label: '渲染精度',     type: 'select',
+    options: [
+      { v: 0.4, t: '流畅 (≈720p)' },
+      { v: 1,   t: '均衡 (≈1080p)' },
+      { v: 2,   t: '高清 (≈1440p)' },
+      { v: 99,  t: '原生 (跟随窗口)' },
+    ],
+    def: 1, group: '性能' },
   // 色散与折射
   { u: 'uMaxDisperse',  label: '色散采样数',   min: 1,    max: 8,    step: 1,     def: 5,     group: '色散与折射' },
   { u: 'uMaxBounce',    label: '最大弹射次数', min: 1,    max: 15,   step: 1,     def: 10,    group: '色散与折射' },
@@ -406,8 +415,15 @@ async function main() {
 
 function resize() {
   const dpr = window.devicePixelRatio || 1;
-  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
-  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  let w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  let h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  // 渲染精度上限: 窗口再大, 内部渲染面积不超过 uResCap × 1080p, 超出按比例缩小(浏览器自动放大显示)
+  const cap = 1920 * 1080 * (state.uResCap || 1);
+  if (w * h > cap) {
+    const s = Math.sqrt(cap / (w * h));
+    w = Math.max(1, Math.round(w * s));
+    h = Math.max(1, Math.round(h * s));
+  }
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w; canvas.height = h;
     allocBuffers(w, h);
