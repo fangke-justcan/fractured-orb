@@ -102,6 +102,10 @@ const errBox = document.getElementById('err');
 const info = document.getElementById('info');
 const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
 if (!gl) fail('需要 WebGL2 支持');
+canvas.addEventListener('webglcontextlost', (e) => {
+  e.preventDefault();
+  setTimeout(() => location.reload(), 1200);
+});
 
 /* ================= 可调参数定义 =================
    uniform 名 / 中文标签 / 范围 / 默认值 / 所属通道 / 分组      */
