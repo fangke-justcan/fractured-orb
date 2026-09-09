@@ -1,22 +1,16 @@
-/*
-
-    Fractured Orb — 本地参数化版
-    ---------------------------
-    原作: 'Fractured Orb' https://www.shadertoy.com/view/ttycWW (tdhooper, 2021)
-    本地修改:
-      * 原作硬编码常量改为 u* uniform, 由 index.html 的参数面板实时驱动
-      * uShape 选择模型: 0 = 原版碎裂球体(二十面体/十二面体面片)
-                         1 = 碎裂方块(空心圆角立方体, 六面片错峰爆炸)
-    未修改的原始源码存档于 source/shader.json 与 *.orig.frag
-
-*/
 
 //#define WOBBLE
 
 //#define DARK_MODE
 
 
-// 色散采样数/最大弹射次数: 原作按 HW_PERFORMANCE 分 5/10 与 3/4 两档, 这里由面板控制
+#if HW_PERFORMANCE==1
+    const float MAX_DISPERSE = 5.;
+    const float MAX_BOUNCE = 10.;
+#else
+    const float MAX_DISPERSE = 3.;
+    const float MAX_BOUNCE = 4.;
+#endif
 
 
 #define PI 3.14159265359
@@ -112,6 +106,18 @@ vec3 boolSign(vec3 v) {
 }
 
 // Closest icosahedron vertex
+#if 0
+vec3 icosahedronVertex(vec3 p) {
+    vec3 ap, v, v2, v3;
+    ap = abs(p);
+    v = vec3(PHI, 1, 0);
+    v2 = v.yzx;
+    v3 = v2.yzx;
+    if (distance(ap, v2) < distance(ap, v)) v = v2;
+    if (distance(ap, v3) < distance(ap, v)) v = v3;
+    return normalize(v) * boolSign(p);
+}
+#else
 // with removed roots from iq
 vec3 icosahedronVertex(vec3 p) {
     vec3 ap = abs(p);
@@ -120,8 +126,23 @@ vec3 icosahedronVertex(vec3 p) {
     if (ap.z+ap.y*PHI > dot(ap,v)) v = vec3(0,PHI,1);
     return v*0.52573111*boolSign(p);
 }
+#endif
 
 // Closest dodecahedron vertex
+#if 0
+vec3 dodecahedronVertex(vec3 p) {
+    vec3 ap, v, v2, v3, v4;
+    ap = abs(p);
+    v = vec3(PHI);
+	v2 = vec3(0, 1, PHI + 1.);
+	v3 = v2.yzx;
+    v4 = v3.yzx;
+    if (distance(ap, v2) < distance(ap, v)) v = v2;
+    if (distance(ap, v3) < distance(ap, v)) v = v3;
+    if (distance(ap, v4) < distance(ap, v)) v = v4;
+    return normalize(v) * boolSign(p);
+}
+#else
 // with removed roots from iq
 vec3 dodecahedronVertex(vec3 p) {
     vec3 ap = abs(p);
@@ -134,23 +155,16 @@ vec3 dodecahedronVertex(vec3 p) {
     if (dot(ap,v4) > dot(ap,v)) v = v4;
     return v*0.35682209*boolSign(p);
 }
+#endif
 
-// 圆角盒子 SDF
-float sdRoundBox(vec3 p, vec3 b, float r) {
-    return fBox(p, b - vec3(r)) - r;
-}
+
+float OUTER = .35;
+float INNER = .24;
 
 float object(vec3 p) {
-    if (uShape < 0.5) {
-        // 原版: 球壳
-        float d = length(p) - uOrbOuter;
-        d = max(d, -d - (uOrbOuter - uOrbInner));
-        return d;
-    }
-    // 方块: 空心圆角立方体
-    float dOut = sdRoundBox(p, vec3(uOrbOuter), uBoxRound);
-    float dIn  = sdRoundBox(p, vec3(uOrbInner), uBoxRound);
-    return max(dOut, -dIn);
+    float d = length(p) - OUTER;
+    d = max(d, -d - (OUTER - INNER));
+    return d;
 }
 
 float animT;
@@ -161,10 +175,7 @@ vec2 map(vec3 p) {
     float scale = 2.5;
     p /= scale;
 
-    // 包围盒加速: 球用球面距离, 方块用圆角盒距离(均为真实距离的下界)
-    float outerBound = uShape < 0.5
-        ? length(p) - uOrbOuter
-        : fBox(p, vec3(uOrbOuter - uBoxRound)) - uBoxRound;
+    float outerBound = length(p) - OUTER;
 
     #ifdef WOBBLE
         float bound = outerBound - .05;
@@ -179,47 +190,34 @@ vec2 map(vec3 p) {
         mat3 trs = rotX(atan(1./PHI)) * rotY(-spin);
         p = trs * p;
     #else
-        float spin = time * (PI/2.) * uSpinSpeed - .15;
+        float spin = time * (PI/2.) - .15;
         pR(p.xz, spin);
     #endif
 
 
 
-    // 四个最近面片中心
-    // 球体: 二十面体/十二面体最近顶点 (原版)
-    // 方块: 最近立方体面 + 邻接面
-    vec3 va, vb, vc, vd;
-    if (uShape < 0.5) {
-        va = icosahedronVertex(p);
-        vb = dodecahedronVertex(p);
+    // Buckyball faces
+    // ---------------
 
-        // Second closest dodecahedron vertex
-        float side = boolSign(dot(p, cross(va, vb)));
-        float r = PI * 2. / 5. * side;
-        vc = erot(vb, va, r);
+    // Four closest vertices of a spherical pentakis dodecahedron
+    // or, four closest faces of a buckyball
+    
+    vec3 va = icosahedronVertex(p);
+    vec3 vb = dodecahedronVertex(p);
 
-        // Third closest dodecahedron vertex
-        vd = erot(vb, va, -r);
-    } else {
-        vec3 ap3 = abs(p);
-        vec3 sg = boolSign(p);
-        if (ap3.x >= ap3.y && ap3.x >= ap3.z) {
-            va = vec3(sg.x, 0, 0); vb = vec3(0, sg.y, 0); vc = vec3(0, 0, sg.z);
-            vd = ap3.y < ap3.z ? vec3(0, -sg.y, 0) : vec3(0, 0, -sg.z);
-        } else if (ap3.y >= ap3.z) {
-            va = vec3(0, sg.y, 0); vb = vec3(0, 0, sg.z); vc = vec3(sg.x, 0, 0);
-            vd = ap3.x < ap3.z ? vec3(-sg.x, 0, 0) : vec3(0, 0, -sg.z);
-        } else {
-            va = vec3(0, 0, sg.z); vb = vec3(sg.x, 0, 0); vc = vec3(0, sg.y, 0);
-            vd = ap3.x < ap3.y ? vec3(-sg.x, 0, 0) : vec3(0, -sg.y, 0);
-        }
-    }
+    // Second closest dodecahedron vertex
+    float side = boolSign(dot(p, cross(va, vb)));
+    float r = PI * 2. / 5. * side;
+    vec3 vc = erot(vb, va, r);
 
-
-
+    // Third closest dodecahedron vertex
+    vec3 vd = erot(vb, va, -r);
+    
+    
+    
     float d = 1e12;
     vec3 pp = p;
-
+    
     // Render the nearest four fragments to get
     // a clean distance estimation
 
@@ -235,18 +233,17 @@ vec2 map(vec3 p) {
             anim = mix(.0, .05, anim);
             p -= va * anim;
         #else
-            float t = mod(time * 2./3. + .25
-                - (dot(va.xy, vec2(1,-1)) + uShape * dot(va, vec3(3.,-3.,1.))) / 30., 1.);
+            float t = mod(time * 2./3. + .25 - dot(va.xy, vec2(1,-1)) / 30., 1.);
             float t2 = clamp(t * 5. - 1.7, 0., 1.);
             float explode = 1. - pow(1. - t2, 10.); // expand
             explode *= 1. - pow(t2, 5.); // contract
             explode += (smoothstep(.32, .34, t) - smoothstep(.34, .5, t)) * .05;
-            explode *= uExplodeAmp;
+            explode *= 1.4;
             t2 = max(t - .53, 0.) * 1.2;
-            float wobble = sin(expImpulse(t2, 20.) * 2.2 + pow(3. * t2, 1.5) * 2. * PI * 2. - PI) * smoothstep(.4, .0, t2) * uWobbleAmp;
+            float wobble = sin(expImpulse(t2, 20.) * 2.2 + pow(3. * t2, 1.5) * 2. * PI * 2. - PI) * smoothstep(.4, .0, t2) * .2;
             float anim = wobble + explode;
             p -= va * anim / 2.8;
-        #endif
+        #endif       
 
         // Build boundary edge of face
         float edgeA = dot(p, normalize(vb - va));
@@ -254,15 +251,15 @@ vec2 map(vec3 p) {
         float edgeC = dot(p, normalize(vd - va));
         float edge = max(max(edgeA, edgeB), edgeC);
         #ifndef WOBBLE
-            edge -= uEdgeWidth;
+            edge -= .005;
         #endif
-
+        
         // Intersect with object
         d = min(d, smax(object(p), edge, .002));
-
+        
         // Reset space for next iteration
         p = pp;
-
+        
         // Cycle faces for next iteration
         vec3 va2 = va;
         va = vb;
@@ -270,7 +267,7 @@ vec2 map(vec3 p) {
         vc = vd;
         vd = va2;
     }
-
+    
     #ifndef WOBBLE
         // Slow down ray as we approach non-exploded object
         float bound = outerBound - .002;
@@ -278,7 +275,7 @@ vec2 map(vec3 p) {
             d = min(d, bound);
         }
     #endif
-
+    
     return vec2(d * scale, 1.);
 }
 
@@ -316,7 +313,7 @@ vec3 light(vec3 origin, vec3 rayDir) {
 	return vec3(l) * hit;
 }
 
-vec3 env(vec3 origin, vec3 rayDir) {
+vec3 env(vec3 origin, vec3 rayDir) {    
     origin = -(vec4(origin, 1)).xyz;
     rayDir = -(vec4(rayDir, 0)).xyz;
 
@@ -377,7 +374,7 @@ Hit march(vec3 origin, vec3 rayDir, float invert, float maxDist, float understep
             res.y = 0.;
             break;
         }
-    }
+    }   
 
     return Hit(res, p, len, steps);
 }
@@ -405,14 +402,14 @@ mat3 calcLookAtMatrix(vec3 ro, vec3 ta, vec3 up) {
 
 void mainImage( out vec4 fragColor, in vec2 fragCoord )
 {
-    float duration = uCycleDuration;
+    float duration = 10./3.;
     #ifdef WOBBLE
         duration = 2.;
     #endif
     time = mod(iTime / duration, 1.);
-
+    
     #ifndef DARK_MODE
-        envOrientation = sphericalMatrix(vec2(uLightTheta, uLightPhi));
+        envOrientation = sphericalMatrix(((vec2(81.5, 119) / vec2(187)) * 2. - 1.) * 2.);
     #else
         envOrientation = sphericalMatrix((vec2(0.7299465240641712,0.3048128342245989) * 2. - 1.) * 2.);
     #endif
@@ -423,7 +420,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     vec2 res;
     vec3 p, rayDir, origin, sam, ref, raf, nor, camOrigin, camDir;
     float invert, ior, offset, extinctionDist, maxDist, firstLen, bounceCount, wavelength;
-
+    
     vec3 col = vec3(0);
     float focal = 3.8;
     bool refracted;
@@ -431,18 +428,18 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
     vec3 bgCol = BGCOL * .22;
 
     invert = 1.;
-    maxDist = 15.;
-
-	camOrigin = vec3(0,0,uCamDist);
-   	camDir = normalize(vec3(uv * uZoom, -1.));
+    maxDist = 15.; 
+    
+	camOrigin = vec3(0,0,9.5);
+   	camDir = normalize(vec3(uv * .168, -1.));
 
 
     firstHit = march(camOrigin, camDir, invert, maxDist, .8);
     firstLen = firstHit.len;
 
     float steps = 0.;
-
-    for (float disperse = 0.; disperse < uMaxDisperse; disperse++) {
+    
+    for (float disperse = 0.; disperse < MAX_DISPERSE; disperse++) {
         invert = 1.;
     	sam = vec3(0);
 
@@ -450,25 +447,25 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
         rayDir = camDir;
 
         extinctionDist = 0.;
-        wavelength = disperse / uMaxDisperse;
+        wavelength = disperse / MAX_DISPERSE;
 		float rand = texture(iChannel0, (fragCoord + floor(iTime * 60.) * 10.) / iChannelResolution[0].xy).r;
-        wavelength += (rand * 2. - 1.) * (.5 / uMaxDisperse);
-
+        wavelength += (rand * 2. - 1.) * (.5 / MAX_DISPERSE);
+        
 		bounceCount = 0.;
 
-        for (float bounce = 0.; bounce < uMaxBounce; bounce++) {
+        for (float bounce = 0.; bounce < MAX_BOUNCE; bounce++) {
 
             if (bounce == 0.) {
                 hit = firstHit;
             } else {
                 hit = march(origin, rayDir, invert, maxDist / 2., 1.);
             }
-
+            
             steps += hit.steps;
-
+            
             res = hit.res;
             p = hit.p;
-
+            
             if (invert < 0.) {
 	            extinctionDist += hit.len;
             }
@@ -478,16 +475,16 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
                 break;
             }
 
-            vec3 nor = normal(p) * invert;
+            vec3 nor = normal(p) * invert;            
             ref = reflect(rayDir, nor);
-
+            
             // shade
             sam += light(p, ref) * .5;
             sam += pow(max(1. - abs(dot(rayDir, nor)), 0.), 5.) * .1;
             sam *= vec3(.85,.85,.98);
 
             // refract
-            float ior = mix(uIorMin, uIorMax, wavelength);
+            float ior = mix(1.2, 1.8, wavelength);
             ior = invert < 0. ? ior : 1. / ior;
             raf = refract(rayDir, nor, ior);
             bool tif = raf == vec3(0); // total internal reflection
@@ -501,26 +498,26 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord )
         }
 
         #ifndef DARK_MODE
-            sam += bounceCount == 0. ? bgCol : env(p, rayDir);
+            sam += bounceCount == 0. ? bgCol : env(p, rayDir);	
         #endif
 
         if (bounceCount == 0.) {
             // didn't bounce, so don't bother calculating dispersion
-            col += sam * uMaxDisperse / 2.;
+            col += sam * MAX_DISPERSE / 2.;
             break;
         } else {
             vec3 extinction = vec3(.5,.5,.5) * .0;
-            extinction = 1. / (1. + (extinction * extinctionDist));
+            extinction = 1. / (1. + (extinction * extinctionDist));	
             col += sam * extinction * spectrum(-wavelength+.25);
         }
 	}
-
+    
     // debug
  	//fragColor = vec4(spectrum(steps / 2000.), 1); return;
     //fragColor = vec4(vec3(bounceCount / MAX_BOUNCE), 1); return;
     //fragColor = vec4(vec3(firstHit.steps / 100.), 1); return;
 
-    col /= uMaxDisperse;
-
+    col /= MAX_DISPERSE;
+        
     fragColor = vec4(col, range(4., 12., firstLen));
 }

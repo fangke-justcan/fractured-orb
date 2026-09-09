@@ -1,9 +1,10 @@
 /*
 
-    Fractured Orb — 本地参数化版 (Image 通道)
-    ----------------------------------------
-    原作: https://www.shadertoy.com/view/ttycWW (tdhooper, 2021)
-    景深/曝光/色调的硬编码常量改为 u* uniform, 由参数面板驱动。
+    Fractured Orb
+    -------------
+
+    A mashup of 'Crystal Tetrahedron' https://www.shadertoy.com/view/WsBfWt
+    and 'Buckyball Fracture' https://www.shadertoy.com/view/WlKyzW
 
 */
 
@@ -14,11 +15,12 @@ vec2 uPixelSize; //The size of a pixel: vec2(1.0/width, 1.0/height)
 float uFar = 1.; // Far plane
 
 const float GOLDEN_ANGLE = 2.39996323;
+const float MAX_BLUR_SIZE = 10.;
 const float RAD_SCALE = 1.; // Smaller = nicer blur, larger = faster
 
 float getBlurSize(float depth, float focusPoint, float focusScale) {
     float coc = clamp((1.0 / focusPoint - 1.0 / depth)*focusScale, -1.0, 1.0);
-    return abs(coc) * uMaxBlur;
+    return abs(coc) * MAX_BLUR_SIZE;
 }
 
 vec3 depthOfField(vec2 texCoord, float focusPoint, float focusScale) {
@@ -26,14 +28,16 @@ vec3 depthOfField(vec2 texCoord, float focusPoint, float focusScale) {
     float centerDepth = centerTex.a * uFar;
     float centerSize = getBlurSize(centerDepth, focusPoint, focusScale);
     vec3 color = centerTex.rgb;
-
-    if (uDofEnabled < 0.5) return color;
+    
+    #ifdef DISABLE_DOF
+    	return color;
+    #endif
 
     float tot = 1.0;
 
     float radius = RAD_SCALE;
     for (float ang = 0.; ang < 10000.; ang += GOLDEN_ANGLE) {
-        if (radius >= uMaxBlur) break;
+        if (radius >= MAX_BLUR_SIZE) break;
 
         vec2 tc = texCoord + vec2(cos(ang), sin(ang)) * uPixelSize * radius;
         vec4 sampleTex = texture(iChannel0, tc);
@@ -48,7 +52,7 @@ vec3 depthOfField(vec2 texCoord, float focusPoint, float focusScale) {
         color += mix(color/tot, sampleColor, m);
         tot += 1.0;
         radius += RAD_SCALE/radius;
-
+        
         // modification: exit early when we're in focus
        // if (centerDepth < uFar / 3. && m == 0.) break;
     }
@@ -59,7 +63,7 @@ vec3 depthOfField(vec2 texCoord, float focusPoint, float focusScale) {
 // http://filmicworlds.com/blog/filmic-tonemapping-operators/
 vec3 tonemap2(vec3 texColor) {
     texColor /= 2.;
-   	texColor *= uExposure;  // Exposure Adjustment
+   	texColor *= 16.;  // Hardcoded Exposure Adjustment
    	vec3 x = max(vec3(0),texColor-0.004);
    	return (x*(6.2*x+.5))/(x*(6.2*x+1.7)+0.06);
 }
@@ -70,10 +74,10 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord) {
 
     //fragColor = vec4(texture(iChannel0, uv).rgb, 1); return;
 
-    vec3 col = depthOfField(uv, uFocusPoint, uFocusScale);
+    vec3 col = depthOfField(uv, .65, 1.);
 
-    col = pow(col, vec3(uPostGamma)) * uPostGain;
+    col = pow(col, vec3(1.25)) * 2.5;
     col = tonemap2(col);
 
-    fragColor = vec4(col, 1);
+    fragColor = vec4(col, 1);    
 }

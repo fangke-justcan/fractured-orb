@@ -100,7 +100,7 @@
 const canvas = document.getElementById('c');
 const errBox = document.getElementById('err');
 const info = document.getElementById('info');
-const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, powerPreference: 'high-performance' });
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: true, powerPreference: 'high-performance' });
 if (!gl) fail('需要 WebGL2 支持');
 
 /* ================= 可调参数定义 =================
@@ -112,8 +112,12 @@ const PARAMS = [
   { u: 'uIorMin',       label: '折射率 下限',  min: 1.0,  max: 2.0,  step: 0.01,  def: 1.2,   group: '色散与折射' },
   { u: 'uIorMax',       label: '折射率 上限',  min: 1.0,  max: 2.5,  step: 0.01,  def: 1.8,   group: '色散与折射' },
   // 形状
-  { u: 'uOrbOuter',     label: '球体外半径',   min: 0.15, max: 0.5,  step: 0.005, def: 0.35,  group: '形状' },
-  { u: 'uOrbInner',     label: '球体内半径',   min: 0.05, max: 0.45, step: 0.005, def: 0.24,  group: '形状' },
+  { u: 'uShape',        label: '模型',         type: 'select',
+    options: [{ v: 0, t: '碎裂球体（原版）' }, { v: 1, t: '碎裂方块' }],
+    def: 1, group: '形状' },
+  { u: 'uOrbOuter',     label: '外壳尺寸',     min: 0.15, max: 0.5,  step: 0.005, def: 0.35,  group: '形状' },
+  { u: 'uOrbInner',     label: '空腔尺寸',     min: 0.05, max: 0.45, step: 0.005, def: 0.24,  group: '形状' },
+  { u: 'uBoxRound',     label: '方块圆角',     min: 0,    max: 0.08, step: 0.002, def: 0.03,  group: '形状' },
   { u: 'uEdgeWidth',    label: '面片缝隙宽度', min: 0,    max: 0.03, step: 0.001, def: 0.005, group: '形状' },
   // 动画
   { u: 'uCycleDuration',label: '循环周期 (秒)', min: 1,    max: 15,   step: 0.1,   def: 10/3,  group: '动画' },
@@ -140,46 +144,7 @@ const PARAMS = [
 const state = {};
 for (const p of PARAMS) state[p.u] = p.def;
 
-/* 把 shader 中的硬编码常量替换为 uniform（保持原文件不做改动，替换在加载时进行） */
-const SUBS_BUFFER_A = [
-  ['const float MAX_DISPERSE = 5.;', ''],
-  ['const float MAX_DISPERSE = 3.;', ''],
-  ['const float MAX_BOUNCE = 10.;', ''],
-  ['const float MAX_BOUNCE = 4.;', ''],
-  ['MAX_DISPERSE', 'uMaxDisperse'],
-  ['MAX_BOUNCE', 'uMaxBounce'],
-  ['float OUTER = .35;',  'float OUTER;'],
-  ['float INNER = .24;',  'float INNER;'],
-  ['float duration = 10./3.;', 'float duration = uCycleDuration;'],
-  ['time = mod(iTime / duration, 1.);',
-   'OUTER = uOrbOuter; INNER = uOrbInner;\n    time = mod(iTime / duration, 1.);'],
-  ['edge -= .005;',       'edge -= uEdgeWidth;'],
-  ['float spin = time * (PI/2.) - .15;', 'float spin = time * (PI/2.) * uSpinSpeed - .15;'],
-  ['explode *= 1.4;',     'explode *= uExplodeAmp;'],
-  ['smoothstep(.4, .0, t2) * .2;', 'smoothstep(.4, .0, t2) * uWobbleAmp;'],
-  ['camOrigin = vec3(0,0,9.5);', 'camOrigin = vec3(0,0,uCamDist);'],
-  ['uv * .168',           'uv * uZoom'],
-  ['float ior = mix(1.2, 1.8, wavelength);', 'float ior = mix(uIorMin, uIorMax, wavelength);'],
-  ['envOrientation = sphericalMatrix(((vec2(81.5, 119) / vec2(187)) * 2. - 1.) * 2.);',
-   'envOrientation = sphericalMatrix(vec2(uLightTheta, uLightPhi));'],
-];
-const SUBS_IMAGE = [
-  ['#ifdef DISABLE_DOF', 'if (uDofEnabled < 0.5) {'],
-  ['#endif', '}'],
-  ['const float MAX_BLUR_SIZE = 10.;', ''],
-  ['MAX_BLUR_SIZE', 'uMaxBlur'],
-  ['depthOfField(uv, .65, 1.)', 'depthOfField(uv, uFocusPoint, uFocusScale)'],
-  ['col = pow(col, vec3(1.25)) * 2.5;', 'col = pow(col, vec3(uPostGamma)) * uPostGain;'],
-  ['texColor *= 16.;',  'texColor *= uExposure;'],
-];
-
-function applySubs(src, subs, label) {
-  for (const [from, to] of subs) {
-    if (!src.includes(from)) fail('参数注入失败: 在 ' + label + ' 中找不到 → ' + from);
-    src = src.split(from).join(to);
-  }
-  return src;
-}
+/* 模型与参数已直接写入 shaders/*.frag（u* uniform），原始源码存档于 source/shader.json 与 *.orig.frag */
 
 const FRAG_HEADER = `#version 300 es
 precision highp float;
@@ -221,6 +186,8 @@ uniform float uMaxBlur;
 uniform float uExposure;
 uniform float uPostGamma;
 uniform float uPostGain;
+uniform float uShape;
+uniform float uBoxRound;
 out vec4 outColor;
 #define texture2D texture
 #define HW_PERFORMANCE 1
@@ -337,7 +304,22 @@ function buildPanel() {
     }
     const row = document.createElement('div');
     row.className = p.check ? 'row-check' : 'row';
-    if (p.check) {
+    if (p.type === 'select') {
+      const lab = document.createElement('div');
+      lab.className = 'row-label';
+      lab.innerHTML = `<span>${p.label}</span>`;
+      const sel = document.createElement('select');
+      sel.style.cssText = 'width:100%;margin-top:2px;background:#26262f;color:#eee;border:1px solid #4a4a58;border-radius:6px;padding:4px 6px;font-size:12px;';
+      for (const o of p.options) {
+        const op = document.createElement('option');
+        op.value = o.v; op.textContent = o.t;
+        sel.appendChild(op);
+      }
+      sel.value = p.def;
+      sel.addEventListener('change', () => { state[p.u] = parseFloat(sel.value); });
+      row.append(lab, sel);
+      inputs[p.u] = sel;
+    } else if (p.check) {
       const cb = document.createElement('input');
       cb.type = 'checkbox'; cb.checked = !!p.def;
       const lb = document.createElement('span');
@@ -369,7 +351,8 @@ function resetParams() {
   for (const p of PARAMS) {
     state[p.u] = p.def;
     const inp = inputs[p.u];
-    if (p.check) inp.checked = !!p.def;
+    if (p.type === 'select') inp.value = p.def;
+    else if (p.check) inp.checked = !!p.def;
     else { inp.rng.value = p.def; inp.val.textContent = fmt(p.def, p.step); }
   }
 }
@@ -393,8 +376,6 @@ async function main() {
     loadText('shaders/image.frag'),
     loadImage('textures/bluenoise.png'),
   ]);
-  bufASrc = applySubs(bufASrc, SUBS_BUFFER_A, 'Buffer A');
-  imgSrc = applySubs(imgSrc, SUBS_IMAGE, 'Image');
   progA = program(bufASrc, 'Buffer A');
   progImg = program(imgSrc, 'Image');
 
@@ -463,8 +444,8 @@ function loop(tms) {
   gl.activeTexture(gl.TEXTURE0);
 
   // ---- Pass 1: Buffer A ----
-  const write = 1 - bufRead;
-  gl.bindFramebuffer(gl.FRAMEBUFFER, bufFbo[write]);
+  const cur = 1 - bufRead;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, bufFbo[cur]);
   gl.viewport(0, 0, W, H);
   gl.useProgram(progA.prog);
   setUniforms(progA, dt);
@@ -472,16 +453,16 @@ function loop(tms) {
   gl.bindTexture(gl.TEXTURE_2D, noiseTex);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-  // ---- Pass 2: Image (输出到屏幕) ----
+  // ---- Pass 2: Image (读取本帧刚写好的 Buffer A, 输出到屏幕) ----
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   gl.viewport(0, 0, W, H);
   gl.useProgram(progImg.prog);
   setUniforms(progImg, dt);
   gl.uniform3fv(progImg.u.iChannelResolution, [W,H,1, 0,0,0, 0,0,0, 0,0,0]);
-  gl.bindTexture(gl.TEXTURE_2D, bufTex[bufRead]);
+  gl.bindTexture(gl.TEXTURE_2D, bufTex[cur]);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-  bufRead = write;
+  bufRead = cur;
   iFrame++;
 }
 
